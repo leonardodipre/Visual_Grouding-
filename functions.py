@@ -32,27 +32,42 @@ def eval_loop_baseline(clip_model, clip_preprocess, yolo_model, data):
 
 
 def train_loop(model, student_model, data, optimizer, criterion_iou, device, selected_loss):
+    """Train for one epoch and return averaged loss metrics.
+
+    When ``selected_loss`` equals ``'att_reg'`` additional loss components are
+    computed. The function returns a dictionary with the mean of each logged
+    value so they can be easily stored or displayed outside the loop.
+    """
+
     model.train()
-    loss_array = []
+
+    total_losses = []
+    rac_losses = []
+    mrc_losses = []
+    ar_losses = []
+    adw_weights = []
+    odw_weights = []
+    bbox_losses = []
+
     # if we selected the attention regulated loss we do some additional things
     # we set it to True for comodity
-    if selected_loss == 'att_reg':
+    if selected_loss == "att_reg":
         selected_loss = True
     else:
         selected_loss = False
 
     for sample in tqdm(data, desc="Processing Training Dataset"):
-    #for sample in data:
         images = sample["image"].to(device)
         descriptions = sample["description"].to(device)
         gt_bboxes = sample["bbox"].to(device)
         bbox_mask = sample["bbox_mask"].to(device)
+
         if selected_loss:
             bbox_ratio = sample["bbox_ratio"].to(device)
 
-
         predicted_bboxes, all_attentions = model(images, descriptions)
         predicted_bboxes = cxcywh_to_xyxy(predicted_bboxes)
+
         if selected_loss:
             with torch.no_grad():
                 _, all_attentions_mom = student_model(images, descriptions)
@@ -60,21 +75,29 @@ def train_loop(model, student_model, data, optimizer, criterion_iou, device, sel
             rhos = {}
             for i, layer in enumerate(all_attentions):
                 rhos[i] = spearmanr_batch(layer, bbox_mask)
+
             relative_rhos = compute_relative_rho(rhos)
             l_rac = rac_loss(relative_rhos, all_attentions, bbox_mask)
             teacher_attentions = torch.stack(all_attentions)
             student_attentions = torch.stack(all_attentions_mom)
+
             # be careful that the kl divergence is not symmetric, first student, second teacher
             l_mrc = mrc_loss(student_attentions, teacher_attentions)
 
-            l_ar = (l_rac/49) + l_mrc
+            l_ar = (l_rac / 49) + l_mrc
 
             w_adw = 0.5 + 1 / (1 + math.exp(-l_ar))
-            w_odw = 0.5 + 1 / (1 + math.exp(bbox_ratio.mean()-1)) # now we take the mean... Will be interesting to multiply the single example loss for the single bbox ratio
-
+            w_odw = 0.5 + 1 / (1 + math.exp(bbox_ratio.mean() - 1))
 
             loss_second_part = criterion_iou(gt_bboxes, predicted_bboxes)
             loss = l_ar + ((w_adw * w_odw) * loss_second_part)
+
+            rac_losses.append(l_rac.item())
+            mrc_losses.append(l_mrc.item())
+            ar_losses.append(l_ar.item())
+            adw_weights.append(w_adw.item())
+            odw_weights.append(w_odw.item())
+            bbox_losses.append(loss_second_part.item())
         else:
             loss = criterion_iou(gt_bboxes, predicted_bboxes)
 
@@ -86,9 +109,22 @@ def train_loop(model, student_model, data, optimizer, criterion_iou, device, sel
             ### update the weights from teacher model to student one
             update_momentum(model, student_model)
 
-        loss_array.append(loss.item())
-    
-    return loss_array
+        total_losses.append(loss.item())
+
+    metrics = {"loss": np.mean(total_losses)}
+    if selected_loss:
+        metrics.update(
+            {
+                "rac_loss": np.mean(rac_losses),
+                "mrc_loss": np.mean(mrc_losses),
+                "att_reg_loss": np.mean(ar_losses),
+                "w_adw": np.mean(adw_weights),
+                "w_odw": np.mean(odw_weights),
+                "bbox_loss": np.mean(bbox_losses),
+            }
+        )
+
+    return metrics
 
 
 

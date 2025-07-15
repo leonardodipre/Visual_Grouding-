@@ -1,5 +1,6 @@
 
 import argparse
+import csv
 from util import *
 from functions import train_loop, eval_loop, eval_loop_baseline
 import warnings
@@ -29,6 +30,7 @@ def main(args):
     selected_loss = args.criterion
 
     verbose = args.verbose
+    log_path = args.csv_log
 
     
     annotations_file_path = '/home/rtx/deep_learning/dataset/refcocog/annotations/instances.json'
@@ -57,6 +59,23 @@ def main(args):
     train_dataloader = get_dataloader(train_dataset, batch_size)
     val_dataloader = get_dataloader(val_dataset, batch_size)
     test_dataloader = get_dataloader(test_dataset, batch_size)
+
+    if log_path is not None:
+        header = ["epoch", "train_loss", "val_mean_iou", "val_accuracy"]
+        if selected_loss == "att_reg":
+            header.extend(
+                [
+                    "rac_loss",
+                    "mrc_loss",
+                    "att_reg_loss",
+                    "w_adw",
+                    "w_odw",
+                    "bbox_loss",
+                ]
+            )
+        with open(log_path, "w", newline="") as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(header)
 
     clip_model, _ = clip.load("RN50", device=DEVICE)
     num_encoders = 6
@@ -87,17 +106,42 @@ def main(args):
     else:
         momentum_model = None
 
-    for epoch in tqdm(range(start_epoch +1 , total_epochs+1)):
-    #for epoch in range(start_epoch +1 , total_epochs+1):
-        loss = train_loop(model, momentum_model, train_dataloader, optimizer, criterion_iou, device=DEVICE, selected_loss=selected_loss)
+    for epoch in tqdm(range(start_epoch + 1, total_epochs + 1)):
+        metrics = train_loop(
+            model,
+            momentum_model,
+            train_dataloader,
+            optimizer,
+            criterion_iou,
+            device=DEVICE,
+            selected_loss=selected_loss,
+        )
+        mean_loss = metrics["loss"]
         if verbose:
-            print(f'loss at epoch {epoch} is {np.asarray(loss).mean()}')
-        if epoch % 2 == 0: # We check the performance every 3 epochs
-            mean_iou, accuracy = eval_loop(model, val_dataloader, device=DEVICE)
-            if verbose:
-                print(f'mean_iou at epoch {epoch} = {mean_iou} --- accuracy = {accuracy}')
+            print(f"loss at epoch {epoch} is {mean_loss}")
+
+        mean_iou, accuracy = eval_loop(model, val_dataloader, device=DEVICE)
+        if verbose:
+            print(f"mean_iou at epoch {epoch} = {mean_iou} --- accuracy = {accuracy}")
+
+        if log_path is not None:
+            row = [epoch, mean_loss, mean_iou, accuracy]
+            if selected_loss == "att_reg":
+                row.extend(
+                    [
+                        metrics["rac_loss"],
+                        metrics["mrc_loss"],
+                        metrics["att_reg_loss"],
+                        metrics["w_adw"],
+                        metrics["w_odw"],
+                        metrics["bbox_loss"],
+                    ]
+                )
+            with open(log_path, "a", newline="") as csvfile:
+                writer = csv.writer(csvfile)
+                writer.writerow(row)
     if end_checkpoint != "none":
-        save_checkpoint(model, optimizer, total_epochs, loss, f"bin/checkpoint_{end_checkpoint}.pth")
+        save_checkpoint(model, optimizer, total_epochs, metrics["loss"], f"bin/checkpoint_{end_checkpoint}.pth")
     mean_iou, accuracy = eval_loop(model, test_dataloader, device=DEVICE)
     print(f'mean iou on test set is {mean_iou} --- accuracy = {accuracy}')
 
@@ -128,6 +172,7 @@ if __name__ == "__main__":
     parser.add_argument('--start_checkpoint', default="none", help="name of the checkpoint to be loaded")
     parser.add_argument('--end_checkpoint', default="none", help="name of the checkpoint to be saved")
     parser.add_argument('--verbose', default=False, type=str2bool, help="verbose or not")
+    parser.add_argument('--csv_log', default=None, help='path to csv file for metric logging')
 
 
     
