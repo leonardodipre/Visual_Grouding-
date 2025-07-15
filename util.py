@@ -12,7 +12,9 @@ import torch.utils.data as data
 import torchvision
 from torchvision import transforms
 import torchvision.transforms.functional as F
-from pathlib import Path
+from scipy import stats
+import ast
+
 
 def create_merged_df(pickle_file_path, annotations_file_path):
     """
@@ -20,7 +22,7 @@ def create_merged_df(pickle_file_path, annotations_file_path):
         refs(umd).p    has 49822  elements
         we return the merged dataframe that has the same elements as the ref file (in the case of the umd one 49822)
     """
-   
+    
 
     with open(annotations_file_path, 'r') as f:
         annotations = json.load(f)["annotations"]
@@ -60,42 +62,6 @@ def create_merged_df(pickle_file_path, annotations_file_path):
     return merged
 
 
-def create_merged_df_augmented(csv_path: str) -> pd.DataFrame:
-    """
-    Legge il CSV unico di RefCOCOg con queste colonne:
-      bbox, split, file_name, sentence, coco_reference, blip_reference     (tutte stringhe)
-    Restituisce un DataFrame con:
-      bbox            → tuple[float, float, float, float]  (x, y, w, h)
-      split           → 'train' | 'val' | 'test'
-      file_name       → path completo all'immagine
-      sentence        → descrizione principale (quella che già usi)
-      coco_reference  → eventualmente lista di stringhe
-      blip_reference  → stringa
-      width, height   → dimensioni originali dell’immagine  (serve a resize_bbox)
-    """
-    csv_path = Path(csv_path)
-    if not csv_path.is_file():
-        raise FileNotFoundError(csv_path)
-
-    df = pd.read_csv(csv_path)
-
-    # bbox: "(299.12, 136.58, 241.7, 88.85)"  ->  (299.12, 136.58, 241.7, 88.85)
-    df["bbox"] = df["bbox"].apply(
-        lambda s: tuple(map(float, s.strip("()").split(",")))
-    )
-
-    # width / height: li ricavi una volta sola, li riutilizzi per ogni campione
-    def _wh(path):
-        with Image.open(path) as im:
-            return im.width, im.height
-
-    df[["width", "height"]] = (
-        df["file_name"].apply(_wh).apply(pd.Series)
-    )
-
-    return df
-
-
 def modify_filename(file_name):
     """
         function for modifying the file_name of each image in the dataframe
@@ -107,6 +73,7 @@ def modify_filename(file_name):
     # Add the root dictory of the dataset
     new_name = f'/home/rtx/deep_learning/dataset/refcocog/images/{base_name}'
     
+    
     return new_name
 
 
@@ -116,6 +83,7 @@ class VisualGroundingRefcocog(data.Dataset):
         
         self.images = dataset['file_name'].tolist()
         self.descriptions = dataset['sentences'].tolist()
+        #self.bboxes = [xywh2xyxy(ast.literal_eval(bbox)) for bbox in dataset['bbox'].tolist()]
         self.bboxes = [xywh2xyxy(bbox) for bbox in dataset['bbox'].tolist()]
         self.transform = modified_clip_preprocess
         self.bbox_transform = bbox_transform
@@ -147,15 +115,22 @@ class VisualGroundingRefcocog(data.Dataset):
         if self.transform:
             original_width, original_height = image.size
             image = self.transform(image)
+        
+        bbox_ratio = calculate_bbox_ratio(original_width, original_height, bbox)
 
         if self.bbox_transform:
             bbox = self.bbox_transform(bbox, (original_width, original_height), (224, 224))
 
 
+        # For AttBalance
+        bbox_mask = create_bbox_mask((7, 7), bbox)
+
         sample = {
             'image': image,
             'description': description,
             'bbox': bbox,
+            'bbox_mask': bbox_mask,
+            'bbox_ratio': bbox_ratio,
         }
 
         return sample
@@ -201,12 +176,11 @@ def calculate_IoU(x_bbox, y_bbox):
     return iou
 
 
-def criterion_iou(x_bbox, target_bbox, l1_weight=1.0, giou_weight=1.0):
+def criterion_iou(x_bbox, target_bbox, l1_weight=1.0, ciou_weight=1.0):
     """
     Combines Smooth L1 loss e CIoU loss for bbox coordinates regression.
     l1_weight: smooth_l1 weigh
     giou_weight: CIoU weight
-    beta: param for the smooth_l1 loss
     """
     # Both sets of boxes are expected to be in (x1, y1, x2, y2) format with 0 <= x1 < x2 and 0 <= y1 < y2
     # and The two boxes should have the same dimensions.
@@ -214,7 +188,7 @@ def criterion_iou(x_bbox, target_bbox, l1_weight=1.0, giou_weight=1.0):
 
     l1 = nn.functional.smooth_l1_loss(x_bbox, target_bbox)
     #print(f"SmoothL1: {l1_weight * l1.item():.2f}, CIoU: {giou_weight * ciou.item():.2f}, Total: {(l1 + ciou).item():.2f}")
-    return l1_weight * l1 + giou_weight * ciou
+    return l1_weight * l1 + ciou_weight * ciou
 
 
 def only_ciou(x_bbox, target_bbox):
@@ -453,6 +427,43 @@ def resize_bbox(bbox, original_size, new_size, keep_aspect_ratio):
     return resized_bbox
 
 
+def create_bbox_mask(dim, bbox):
+    """
+    Create a 7x7 binary mask with 1s inside the bounding box, then flatten it to have a 49 one.
+    """
+    h, w = dim
+
+    tmp_bbox = bbox.clone() # if we dont make a copy we'll modify the 'original' bbox, Python does this for tensors and numpy array (mutable object)
+
+    tmp_bbox *= h # we have the bbox normalized (/224) and want to project them into a 7x7 grid
+
+    tmp_bbox = tmp_bbox.numpy()
+    x_min, y_min, x_max, y_max = tmp_bbox
+
+    x_min = int(x_min)
+    x_max = int(x_max)
+    y_min = int(y_min)
+    y_max = int(y_max)
+
+    # Create a 7x7 mask filled with zeros 
+    mask = torch.zeros((h, w), dtype=torch.float32)
+    # Set grid cells to 1 inside bbox
+    mask[y_min:y_max, x_min:x_max] = 1
+    mask = mask.flatten()
+    return mask
+
+
+def calculate_bbox_ratio(width_image, height_image, bbox):
+    
+    x1, y1, x2, y2 = bbox
+
+    bbox_area = (x2 - x1) * (y2 - y1)
+    image_area = width_image * height_image
+
+    bbox_ratio = bbox_area / image_area
+
+    return bbox_ratio
+
 
 def denormalize_data(image, bbox1, bbox2, description):
     """
@@ -525,5 +536,124 @@ def load_checkpoint(model, optimizer, path="checkpoint.pth"):
     epoch = checkpoint['epoch']
     loss = checkpoint['loss']
     
-    print(f"Resuming from epoch {epoch} with loss {loss}")
+    #print(f"Resuming from epoch {epoch} with loss {loss}")
     return model, optimizer, epoch, loss
+
+
+def compute_softmax_mean_heads_attention(attention_all_heads):
+    """
+        We need to:
+                    1. extract the attention between the reg token and the visual ones
+                    2. average the attention of all heads
+                    3. apply the softmax
+    """
+    # (batch_size, heads, seq_len, seq_len) -> (batch_size, seq_len, seq_len) ## average among heads
+    mean_result = torch.mean(attention_all_heads, dim=1)
+    # (batch_size, seq_len, seq_len) -> (batch_size, seq_len, seq_len)
+    softmax_result = mean_result.softmax(dim = -1)
+    # (batch_size, seq_len, seq_len) -> (batch_size, 49) ## only reg-visual tokens
+    reg_visual_attention = softmax_result[:, -1, :49]
+
+    return reg_visual_attention
+
+
+def compute_relative_rho(rho):
+
+    all_rhos = torch.stack(list(rho.values()))
+    # Perform the summation of the rhos divided by num_layers -> mean
+    mean_rho_per_example = all_rhos.mean(dim=0)
+
+    # relative_rho = rho - mean + 1
+    relative_rho = {
+        layer: rho - mean_rho_per_example + 1
+        for layer, rho in rho.items()
+    }
+
+    return relative_rho
+
+
+def rac_loss(realtive_rhos, attention_values, masks, eps=1e-6):
+    
+    inverted_masks = 1 - masks
+
+    all_relative_rhos = torch.stack(list(realtive_rhos.values()))
+
+    all_attention_values = torch.stack(attention_values)
+
+    # Hadamard products (elementwise multiplication) -> (num_layers, batch_size, 49)
+    # We broadcast the masks on each layer
+    attention_in_mask = all_attention_values * masks.unsqueeze(0)          # * M ## element-wise multiplication
+    attention_out_mask = all_attention_values * inverted_masks.unsqueeze(0) # * M-
+
+
+    # Sum over the 49 spatial positions -> (num_layers, batch_size)
+    sum_in = attention_in_mask.sum(dim=-1)
+    sum_out = attention_out_mask.sum(dim=-1)
+
+    # Compute the logs (add eps to prevent log(0))
+    log_in = torch.log(sum_in + eps)                  # log(summation attention_i * M)
+    log_out = torch.log(1 - sum_out + eps)            # log(summation attention_i * M-)
+
+    # Final loss: shape (6, B)
+    per_layer_loss = all_relative_rhos * (-log_in) - log_out
+
+    # (6, batch_size) -> (, batch_size)
+    per_example_loss = per_layer_loss.sum(dim=0)  # sum over layers 
+
+    rac_loss = per_example_loss.mean()
+
+    return rac_loss
+
+
+def spearmanr_batch(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    """
+    Compute Spearman's rank correlation coefficient (ρ) for each pair of vectors in the batch.
+
+    Args:
+        x: Tensor of shape (batch_size, dim)
+        y: Tensor of shape (batch_size, dim)
+
+    Returns:
+        rho: Tensor of shape (batch_size,) with Spearman's rho for each sample in the batch
+    """
+
+    def compute_ranks(tensor):
+        # Get ranks using double argsort
+        sorted_indices = torch.argsort(tensor, dim=1)
+        ranks = torch.argsort(sorted_indices, dim=1).float()
+        return ranks
+
+    # 1. Get the ranks
+    x_rank = compute_ranks(x)
+    y_rank = compute_ranks(y)
+
+    # 2. Normalize the ranks (optional for stability)
+    x_rank = x_rank - x_rank.mean(dim=1, keepdim=True)
+    y_rank = y_rank - y_rank.mean(dim=1, keepdim=True)
+
+    # 3. Compute the Spearman correlation via Pearson on the ranks
+    numerator = (x_rank * y_rank).sum(dim=1)
+    denominator = torch.sqrt((x_rank ** 2).sum(dim=1) * (y_rank ** 2).sum(dim=1))
+    rho = numerator / denominator
+
+    return rho
+
+
+def mrc_loss(student_attentions, teacher_attentions):
+    """
+    Computes the KL divergence loss between student and teacher attention maps.
+    """
+    # Ensure teacher is normalized (probabilities) and student is in log-space
+    student_log = torch.log_softmax(student_attentions, dim=-1)  # (6, B, 49)
+    teacher_prob = torch.softmax(teacher_attentions, dim=-1)     # (6, B, 49)
+
+    # KL divergence: sum over tokens (dim=-1), then mean over batch, then sum over layers
+    kl = nn.functional.kl_div(student_log, teacher_prob, reduction='batchmean')  # scalar
+    return kl
+
+
+
+@torch.no_grad()
+def update_momentum(model, momentum_model, m=0.9):
+    for param_q, param_k in zip(model.parameters(), momentum_model.parameters()):
+        param_k.data = param_k.data * m + param_q.data * (1. - m)

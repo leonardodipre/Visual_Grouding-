@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import math
+from util import compute_softmax_mean_heads_attention
 
 
 ###### Positional Encoding ######
@@ -67,12 +68,16 @@ class MultiHeadAttentionBlock(nn.Module):
     if mask is not None:
       # where is True substitute with very big, negative number
       attention_scores.masked_fill(mask == 0, -1e9)
+    
+    # In the paper of AttBalance they first perform the mean and then the softmax...
+    attention_scores_without_softmax = attention_scores
+
     attention_scores = attention_scores.softmax(dim = -1) # (batch_size, h, seq_len, seq_len)
 
     if dropout is not None:
       attention_scores = dropout(attention_scores)
 
-    return (attention_scores @ value), attention_scores
+    return (attention_scores @ value), attention_scores_without_softmax
 
 
   def forward(self, q, k, v, mask):
@@ -168,6 +173,9 @@ class EncoderBlock(nn.Module):
     # mask for padding tokens.
     # we are calling the self_attention_block with the same input (Self attention, won't be the same for Cross attention)
     self_attention_block_output = self.self_attention_block(x, x, x, mask)
+
+    # For AttBalance
+    attention_maps = self.self_attention_block.attention_scores
     
     x = self.add_norm_1(x, self_attention_block_output)
 
@@ -175,7 +183,7 @@ class EncoderBlock(nn.Module):
     
     x = self.add_norm_2(x, feed_forward_block_output)
 
-    return x
+    return x, attention_maps
 
 
 
@@ -184,12 +192,15 @@ class Encoder(nn.Module):
 
   def __init__(self, layers: nn.ModuleList):
     super().__init__()
-    self.layers = layers
+    self.layers = layers # how many encoder layers (blocks) we stacked
 
   def forward(self, x, mask):
+    all_attention_maps = []
     for layer in self.layers:
-      x = layer(x, mask)
-    return x
+      x, attention_map = layer(x, mask)
+      softmaxed_mean_attention = compute_softmax_mean_heads_attention(attention_map)
+      all_attention_maps.append(softmaxed_mean_attention)
+    return x, all_attention_maps
 
 
 def build_encoder_stack(num_encoders, d_model, h, dropout, d_ff):

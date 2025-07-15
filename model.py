@@ -77,10 +77,10 @@ class VisualLanguisticTranformer(nn.Module):
 
         mask = mask.unsqueeze(1).unsqueeze(2)  # (batch_size, 1, 1, 127)
 
-        output_encoder_stack = self.encoder_stack(x, mask) # (batch_size, 127, 256)
+        output_encoder_stack, all_heads_attention = self.encoder_stack(x, mask) # (batch_size, 127, 256)
         educated_reg_token = output_encoder_stack[:, -1, :] # now it's educated after having access to both visual and linguistic tokens # (batch_size, 256)
         predicted_bbox = self.prediction_head(educated_reg_token) # (batch_size, 4)
-        return predicted_bbox
+        return predicted_bbox, all_heads_attention
 
 
 
