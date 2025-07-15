@@ -11,6 +11,7 @@ import copy
 import numpy as np
 import torchvision
 import pandas as pd
+import ast
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -35,8 +36,10 @@ def main(args):
     
 
     whole_df = create_merged_df(pickle_file_path, annotations_file_path)
-    #whole_df = pd.read_csv('dataset/refcocog_augmented.csv')
     
+    #whole_df = pd.read_csv('dataset/refcocog_augmented.csv')
+    #whole_df['bbox'] = whole_df['bbox'].apply(ast.literal_eval)
+
     # split the whole dataframe in train, val, test
     train_df = whole_df.loc[whole_df['split'] == 'train']
     val_df   = whole_df.loc[whole_df['split'] == 'val']

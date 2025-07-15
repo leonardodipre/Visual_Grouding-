@@ -67,7 +67,7 @@ def train_loop(model, student_model, data, optimizer, criterion_iou, device, sel
             # be careful that the kl divergence is not symmetric, first student, second teacher
             l_mrc = mrc_loss(student_attentions, teacher_attentions)
 
-            l_ar = l_rac + l_mrc
+            l_ar = (l_rac/49) + l_mrc
 
             w_adw = 0.5 + 1 / (1 + math.exp(-l_ar))
             w_odw = 0.5 + 1 / (1 + math.exp(bbox_ratio.mean()-1)) # now we take the mean... Will be interesting to multiply the single example loss for the single bbox ratio
