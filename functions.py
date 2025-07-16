@@ -36,6 +36,16 @@ def train_loop(model, student_model, data, optimizer, criterion_iou, device, sel
     loss_array = []
     # if we selected the attention regulated loss we do some additional things
     # we set it to True for comodity
+
+    total_losses = []
+    rac_losses = []
+    mrc_losses = []
+    ar_losses = []
+    adw_weights = []
+    odw_weights = []
+    bbox_losses = []
+
+
     if selected_loss == 'att_reg':
         selected_loss = True
     else:
@@ -75,6 +85,13 @@ def train_loop(model, student_model, data, optimizer, criterion_iou, device, sel
 
             loss_second_part = criterion_iou(gt_bboxes, predicted_bboxes)
             loss = l_ar + ((w_adw * w_odw) * loss_second_part)
+
+            rac_losses.append(l_rac.item())
+            mrc_losses.append(l_mrc.item())
+            ar_losses.append(l_ar.item())
+            adw_weights.append(w_adw)
+            odw_weights.append(w_odw)
+            bbox_losses.append(loss_second_part.item())
         else:
             loss = criterion_iou(gt_bboxes, predicted_bboxes)
 
@@ -85,10 +102,32 @@ def train_loop(model, student_model, data, optimizer, criterion_iou, device, sel
         if selected_loss:
             ### update the weights from teacher model to student one
             update_momentum(model, student_model)
+            total_losses.append(loss.item())
 
-        loss_array.append(loss.item())
+    metrics = {"loss": np.mean(total_losses)}
+
+    if selected_loss:
+        metrics.update(
+            {
+                "rac_loss": np.mean(rac_losses),
+                "mrc_loss": np.mean(mrc_losses),
+                "att_reg_loss": np.mean(ar_losses),
+                "w_adw": np.mean(adw_weights),
+                "w_odw": np.mean(odw_weights),
+                "bbox_loss": np.mean(bbox_losses),
+            }
+        )
+
+    return metrics
+            
     
-    return loss_array
+        
+
+    return metrics
+
+        
+    
+    
 
 
 

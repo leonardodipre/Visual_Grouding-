@@ -136,15 +136,16 @@ class VisualGroundingRefcocog(data.Dataset):
         return sample
 
 
-def get_dataloader(dataset, batch_size):
 
+def get_dataloader(dataset, batch_size, shuffle=True):
     data_loader = DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=True,
-        #num_workers=2
+        shuffle=shuffle,
+        num_workers=10,              
+        pin_memory=True,            
+        persistent_workers=True     
     )
-
     return data_loader
 
 

@@ -1,5 +1,6 @@
 
 import argparse
+import csv
 from util import *
 from functions import train_loop, eval_loop, eval_loop_baseline
 import warnings
@@ -29,21 +30,29 @@ def main(args):
     selected_loss = args.criterion
 
     verbose = args.verbose
-
+    log_path = args.csv_log
     
     annotations_file_path = '/home/rtx/deep_learning/dataset/refcocog/annotations/instances.json'
     pickle_file_path = '/home/rtx/deep_learning/dataset/refcocog/annotations/refs(umd).p'
     
+    #augmeted dataset
+    augmeted_dataset = "refcocog_aug_grouped.csv"
 
-    whole_df = create_merged_df(pickle_file_path, annotations_file_path)
+    #whole_df = create_merged_df(pickle_file_path, annotations_file_path)
     
-    #whole_df = pd.read_csv('dataset/refcocog_augmented.csv')
-    #whole_df['bbox'] = whole_df['bbox'].apply(ast.literal_eval)
+    whole_df = pd.read_csv(augmeted_dataset)
+    whole_df['bbox'] = whole_df['bbox'].apply(ast.literal_eval)
 
     # split the whole dataframe in train, val, test
     train_df = whole_df.loc[whole_df['split'] == 'train']
     val_df   = whole_df.loc[whole_df['split'] == 'val']
     test_df  = whole_df.loc[whole_df['split'] == 'test']
+
+    if log_path is not None:
+        with open(log_path, "w", newline="") as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(["epoch", "train_loss", "val_mean_iou", "val_accuracy"])
+
 
     keep_aspect_ratio = True # -> if False stretches the image to 224x224
     image_transform = modified_clip_preprocess(keep_aspect_ratio)
@@ -54,9 +63,27 @@ def main(args):
     val_dataset = VisualGroundingRefcocog(val_df, tokenizer, prefix_description, image_transform, bbox_transform)
     test_dataset = VisualGroundingRefcocog(test_df, tokenizer, prefix_description, image_transform, bbox_transform)# has 5024 elements
     
-    train_dataloader = get_dataloader(train_dataset, batch_size)
-    val_dataloader = get_dataloader(val_dataset, batch_size)
-    test_dataloader = get_dataloader(test_dataset, batch_size)
+
+    train_dataloader = get_dataloader(train_dataset, batch_size, shuffle=True)
+    val_dataloader = get_dataloader(val_dataset, batch_size, shuffle=False)
+    test_dataloader = get_dataloader(test_dataset, batch_size, shuffle=False)
+
+    if log_path is not None:
+        header = ["epoch", "train_loss", "val_mean_iou", "val_accuracy"]
+        if selected_loss == "att_reg":
+            header.extend(
+                [
+                    "rac_loss",
+                    "mrc_loss",
+                    "att_reg_loss",
+                    "w_adw",
+                    "w_odw",
+                    "bbox_loss",
+                ]
+            )
+        with open(log_path, "w", newline="") as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(header)
 
     clip_model, _ = clip.load("RN50", device=DEVICE)
     num_encoders = 6
@@ -88,18 +115,50 @@ def main(args):
         momentum_model = None
 
     for epoch in tqdm(range(start_epoch +1 , total_epochs+1)):
-    #for epoch in range(start_epoch +1 , total_epochs+1):
-        loss = train_loop(model, momentum_model, train_dataloader, optimizer, criterion_iou, device=DEVICE, selected_loss=selected_loss)
+
+        metrics = train_loop(model, momentum_model, train_dataloader, optimizer, criterion_iou, device=DEVICE, selected_loss=selected_loss)
+        mean_loss = metrics["loss"]
+
         if verbose:
-            print(f'loss at epoch {epoch} is {np.asarray(loss).mean()}')
-        if epoch % 2 == 0: # We check the performance every 3 epochs
-            mean_iou, accuracy = eval_loop(model, val_dataloader, device=DEVICE)
-            if verbose:
-                print(f'mean_iou at epoch {epoch} = {mean_iou} --- accuracy = {accuracy}')
+            print(f"loss at epoch {epoch} is {mean_loss}")
+        
+        mean_iou, accuracy = eval_loop(model, val_dataloader, device=DEVICE)
+
+        if verbose:
+            print(f"mean_iou at epoch {epoch} = {mean_iou} --- accuracy = {accuracy}")
+
+        if log_path is not None:
+            row = [epoch, mean_loss, mean_iou, accuracy]
+            if selected_loss == "att_reg":
+                row.extend([
+                    metrics["rac_loss"],
+                    metrics["mrc_loss"],
+                    metrics["att_reg_loss"],
+                    metrics["w_adw"],
+                    metrics["w_odw"],
+                    metrics["bbox_loss"],
+                ])
+            with open(log_path, "a", newline="") as csvfile:
+                writer = csv.writer(csvfile)
+                writer.writerow(row)
+
+    if end_checkpoint != "none":
+        
+        save_checkpoint(model, optimizer, total_epochs, metrics["loss"], f"bin/checkpoint_{end_checkpoint}.pth")
+    mean_iou, accuracy = eval_loop(model, test_dataloader, device=DEVICE)
+    print(f'mean iou on test set is {mean_iou} --- accuracy = {accuracy}')
+
+
+
     if end_checkpoint != "none":
         save_checkpoint(model, optimizer, total_epochs, loss, f"bin/checkpoint_{end_checkpoint}.pth")
     mean_iou, accuracy = eval_loop(model, test_dataloader, device=DEVICE)
     print(f'mean iou on test set is {mean_iou} --- accuracy = {accuracy}')
+
+    if log_path is not None:
+            with open(log_path, "a", newline="") as csvfile:
+                writer = csv.writer(csvfile)
+                writer.writerow([epoch, mean_loss, mean_iou, accuracy])
 
 
 
@@ -120,7 +179,7 @@ if __name__ == "__main__":
     
     # Add arguments
     parser.add_argument('--batch_size', default="32", type=int, help='batch size of training')
-    parser.add_argument('--epochs', default="50", type=int, help='number of epochs')
+    parser.add_argument('--epochs', default="100", type=int, help='number of epochs')
     parser.add_argument('--optimizer', default="AdamW", help="select 'Adam' or 'sgd' or 'AdamW'")
     parser.add_argument('--learning_rate', default="0.0001", type=float, help='learning rate of the model')
     parser.add_argument('--patience', default="5", type=int, help='patience of the model')
@@ -128,7 +187,7 @@ if __name__ == "__main__":
     parser.add_argument('--start_checkpoint', default="none", help="name of the checkpoint to be loaded")
     parser.add_argument('--end_checkpoint', default="none", help="name of the checkpoint to be saved")
     parser.add_argument('--verbose', default=False, type=str2bool, help="verbose or not")
-
+    parser.add_argument('--csv_log', default=None, help='path to csv file for metric logging')
 
     
     # Parse the arguments
