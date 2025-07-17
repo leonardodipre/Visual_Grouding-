@@ -1,0 +1,3 @@
+# Ignora tutti i file .pth in una cartella "bin"
+bin/*.pth
+
