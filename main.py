@@ -87,7 +87,12 @@ def main(args):
 
     clip_model, _ = clip.load("RN50", device=DEVICE)
     num_encoders = 6
-    model = VisualLanguisticTranformer(num_encoders, clip_model)
+    model = VisualLanguisticTranformer(
+        num_encoders,
+        clip_model,
+        use_concat=args.concat,
+        use_pyramid=args.pyramid,
+    )
     # we apply the init_weights function to initialize the projection layers -> speed up training
     # we start with better weights.
     model.apply(init_weights)
@@ -183,6 +188,8 @@ if __name__ == "__main__":
     parser.add_argument('--end_checkpoint', default="none", help="name of the checkpoint to be saved")
     parser.add_argument('--verbose', default=False, type=str2bool, help="verbose or not")
     parser.add_argument('--csv_log', default=None, help='path to csv file for metric logging')
+    parser.add_argument('--concat', default=False, type=str2bool, help='concatenate multi-scale features')
+    parser.add_argument('--pyramid', default=False, type=str2bool, help='use feature pyramid network')
 
     
     # Parse the arguments

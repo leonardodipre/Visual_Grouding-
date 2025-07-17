@@ -23,13 +23,16 @@ from transformer import PositionalEncoding, build_encoder_stack
 
 class VisualLanguisticTranformer(nn.Module):
 
-    def __init__(self, num_encoders, clip_model):
+    def __init__(self, num_encoders, clip_model, use_concat=False, use_pyramid=False):
         super(VisualLanguisticTranformer, self).__init__()
 
         # modified_part = types.MethodType(new_part, where_to_attach_it_to)
+        clip_model.visual.fpn = FPN()
         clip_model.visual.forward = types.MethodType(modified_visual_forward, clip_model.visual)
         clip_model.encode_text = types.MethodType(modified_encode_text, clip_model)
         self.clip_model = clip_model
+        self.use_concat = use_concat
+        self.use_pyramid = use_pyramid
         # we want to keep froze the CLIP's encoders.
         for param in self.clip_model.parameters():
             param.requires_grad = False
@@ -39,6 +42,7 @@ class VisualLanguisticTranformer(nn.Module):
 
         self.visual_projection_layer = nn.Linear(2048, 256)
         self.richer_visual_projection_layer = nn.Linear(3840, 256)
+        self.visual_pyramid_projection = nn.Linear(1024, 256)
         self.textual_projection_layer = nn.Linear(1024, 256)
         self.positional_encoding = PositionalEncoding(d_model=256, seq_len=127, dropout=0.1)
         self.encoder_stack = build_encoder_stack(num_encoders=num_encoders, d_model=256, h=8, dropout=0.1, d_ff=2048)
@@ -49,15 +53,23 @@ class VisualLanguisticTranformer(nn.Module):
 
     def forward(self, image, text):
         #print(image.shape) # (batch_size, 3, 224, 224)
-        image_embeds = self.clip_model.visual(image, concat=True) # (batch_size, 2048, 7, 7) # before modifying the visual (batch_size, 1024)
-        textual_mask = torch.where(text != 0, 1, 0) # 1 where the element is not PAD and 0 where it is
-        text_embeds = self.clip_model.encode_text(text) # (batch_size, 77, 1024)
-        image_features_flattened = image_embeds.flatten(start_dim=2, end_dim=-1).permute(0, 2, 1) # (batch_size, 49, 2048) or if we used concat=True (batch_size, 49, 3840)
-        text_features_flattened = text_embeds # (batch_size, 77, 1024)
-        if image_features_flattened.shape[2] == 2048:
-            projected_visual = self.visual_projection_layer(image_features_flattened) # (batch_size, 49, 256)
+        features = self.clip_model.visual(image, concat=self.use_concat, pyramid=self.use_pyramid)
+        textual_mask = torch.where(text != 0, 1, 0)
+        text_embeds = self.clip_model.encode_text(text)
+
+        if self.use_pyramid:
+            proj_pyramid = [F.adaptive_avg_pool2d(f, 7) for f in features]
+            visual = torch.cat(proj_pyramid, dim=1)
+            image_features_flattened = visual.flatten(2).permute(0, 2, 1)
+            projected_visual = self.visual_pyramid_projection(image_features_flattened)
         else:
-            projected_visual = self.richer_visual_projection_layer(image_features_flattened) # (batch_size, 49, 256)
+            image_features_flattened = features.flatten(2).permute(0, 2, 1)
+            if self.use_concat:
+                projected_visual = self.richer_visual_projection_layer(image_features_flattened)
+            else:
+                projected_visual = self.visual_projection_layer(image_features_flattened)
+
+        text_features_flattened = text_embeds  # (batch_size, 77, 1024)
         projected_textual = self.textual_projection_layer(text_features_flattened)  # (batch_size, 77, 256)
         reg_token = torch.zeros(projected_textual.shape[0], 1, projected_textual.shape[-1]).to(projected_textual.device) # (batch_size, 1, 256)
 
@@ -102,7 +114,25 @@ class PredictionHead(nn.Module):
         return x
 
 
-def modified_visual_forward(self, x: torch.Tensor, concat=False):
+class FPN(nn.Module):
+    def __init__(self, in_channels=(256, 512, 1024, 2048), out_channels=256):
+        super().__init__()
+        self.lat = nn.ModuleList([nn.Conv2d(c, out_channels, 1) for c in in_channels])
+        self.smooth = nn.ModuleList([
+            nn.Conv2d(out_channels, out_channels, 3, padding=1) for _ in in_channels
+        ])
+
+    def forward(self, feats):
+        c1, c2, c3, c4 = feats
+        p4 = self.lat[3](c4)
+        p3 = self.lat[2](c3) + F.interpolate(p4, size=c3.shape[-2:], mode="nearest")
+        p2 = self.lat[1](c2) + F.interpolate(p3, size=c2.shape[-2:], mode="nearest")
+        p1 = self.lat[0](c1) + F.interpolate(p2, size=c1.shape[-2:], mode="nearest")
+        p4, p3, p2, p1 = [s(f) for s, f in zip(self.smooth, [p4, p3, p2, p1])]
+        return [p1, p2, p3, p4]
+
+
+def modified_visual_forward(self, x: torch.Tensor, concat=False, pyramid=False):
     """
         Open AI official implementation, we removed the last attention pooling layer
         to keep more information.
@@ -125,26 +155,19 @@ def modified_visual_forward(self, x: torch.Tensor, concat=False):
 
     x = x.type(self.conv1.weight.dtype)
     x = stem(x)
-    x = self.layer1(x) # (batch_size, 256, 56, 56)
-    x_layer1 = x
-    x = self.layer2(x) # (batch_size, 512, 28, 28)
-    x_layer2 = x
-    x = self.layer3(x) # (batch_size, 1024, 14, 14)
-    x_layer3 = x
-    x = self.layer4(x) # (batch_size, 2048, 7, 7)
+    c1 = self.layer1(x)
+    c2 = self.layer2(c1)
+    c3 = self.layer3(c2)
+    c4 = self.layer4(c3)
 
     if concat:
-        pool = nn.AdaptiveAvgPool2d((7, 7)) # (batch_size, x, d, d) -> (batch_size, x, 7, 7)
-        # (batch_size, 3840, 7, 7) [256+512+1024+2048]
-        x = torch.cat((pool(x_layer1),
-                      pool(x_layer2),
-                      pool( x_layer3),
-                      x), dim=1)
-        
+        pool = nn.AdaptiveAvgPool2d((7, 7))
+        return torch.cat((pool(c1), pool(c2), pool(c3), c4), dim=1)
 
-    # x = self.attnpool(x) <- removed attention pooling layer
-    # now x can have shape (batch_size, 2048, 7, 7) or (batch_size, 3840, 7, 7)
-    return x
+    if pyramid:
+        return self.fpn([c1, c2, c3, c4])
+
+    return c4
 
 
 def modified_encode_text(self, text):
