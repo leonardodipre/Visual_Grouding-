@@ -6,6 +6,28 @@ def plot_metrics(csv_file):
     df = pd.read_csv(csv_file)
     epochs = df['epoch']
 
+   
+    min_idx = df['train_loss'].idxmin()
+    min_value = df.loc[min_idx, 'train_loss']
+    min_epoch = df.loc[min_idx, 'epoch']
+
+    print(f"train_loss minimo: {min_value:.4f} all'epoch {min_epoch}")
+
+    max_val_mean_iou = df['val_mean_iou'].idxmax()
+    max_value_iou = df.loc[max_val_mean_iou, 'val_mean_iou']
+    min_epoch_iou = df.loc[max_val_mean_iou, 'epoch']
+
+    print(f"val_mean_iou max: {max_value_iou:.4f} all'epoch {min_epoch_iou}")
+
+    max_val_mean_acc = df['val_accuracy'].idxmax()
+    max_value_acc = df.loc[max_val_mean_acc, 'val_accuracy']
+    min_epoch_acc = df.loc[max_val_mean_acc, 'epoch']
+
+    print(f"val_accuracy max: {max_value_acc:.4f} all'epoch {min_epoch_acc}")
+
+
+
+    
     # Plot generale delle loss principali
     plt.figure(figsize=(10, 6))
     plt.plot(epochs, df['train_loss'], label='Train Loss')
@@ -50,6 +72,8 @@ def plot_metrics(csv_file):
     plt.grid(True)
     plt.legend()
     plt.show()
+    
+    
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Plot metrics from a training log CSV.')

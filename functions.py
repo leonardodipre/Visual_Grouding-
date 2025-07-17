@@ -8,6 +8,8 @@ import numpy as np
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
+W_ODW_BETA = 0.5
+
 def eval_loop_baseline(clip_model, clip_preprocess, yolo_model, data):
     correct = 0
     total = 0
@@ -80,8 +82,9 @@ def train_loop(model, student_model, data, optimizer, criterion_iou, device, sel
             l_ar = (l_rac/49) + l_mrc
 
             w_adw = 0.5 + 1 / (1 + math.exp(-l_ar))
-            w_odw = 0.5 + 1 / (1 + math.exp(bbox_ratio.mean()-1)) # now we take the mean... Will be interesting to multiply the single example loss for the single bbox ratio
-
+           
+            #w_odw = 0.5 + 1 / (1 + math.exp(bbox_ratio.mean()-1)) # now we take the mean... Will be interesting to multiply the single example loss for the single bbox ratio
+            w_odw = 0.5 + 1 / (1 + math.exp(W_ODW_BETA * (bbox_ratio.mean() - 1)))
 
             loss_second_part = criterion_iou(gt_bboxes, predicted_bboxes)
             loss = l_ar + ((w_adw * w_odw) * loss_second_part)

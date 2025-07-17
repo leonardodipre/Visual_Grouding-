@@ -28,7 +28,7 @@ def main(args):
     optimizers = {'Adam': torch.optim.Adam, 'AdamW': torch.optim.AdamW, 'sgd': torch.optim.SGD}
 
     selected_loss = args.criterion
-
+    print("Selected loss" , selected_loss)
     verbose = args.verbose
     log_path = args.csv_log
     
@@ -149,11 +149,6 @@ def main(args):
     print(f'mean iou on test set is {mean_iou} --- accuracy = {accuracy}')
 
 
-
-    if end_checkpoint != "none":
-        save_checkpoint(model, optimizer, total_epochs, loss, f"bin/checkpoint_{end_checkpoint}.pth")
-    mean_iou, accuracy = eval_loop(model, test_dataloader, device=DEVICE)
-    print(f'mean iou on test set is {mean_iou} --- accuracy = {accuracy}')
 
     if log_path is not None:
             with open(log_path, "a", newline="") as csvfile:
