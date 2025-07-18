@@ -2,7 +2,7 @@
 import argparse
 import csv
 from util import *
-from functions import train_loop, eval_loop, eval_loop_baseline
+from functions import train_loop_attbalance, eval_loop, eval_loop_baseline
 import warnings
 from tqdm import tqdm
 from model import VisualLanguisticTranformer
@@ -59,14 +59,15 @@ def main(args):
     bbox_transform = lambda bbox, orig, new: resize_bbox(bbox, orig, new, keep_aspect_ratio)
     tokenizer = clip.tokenize
     prefix_description =  "find the region that corresponds to the description "
-    train_dataset = VisualGroundingRefcocog(train_df, tokenizer, prefix_description, image_transform, bbox_transform)
-    val_dataset = VisualGroundingRefcocog(val_df, tokenizer, prefix_description, image_transform, bbox_transform)
-    test_dataset = VisualGroundingRefcocog(test_df, tokenizer, prefix_description, image_transform, bbox_transform)# has 5024 elements
+    prefix_root = None
+    train_dataset = VisualGroundingRefcocog(train_df, tokenizer, prefix_description, prefix_root, image_transform, bbox_transform)
+    val_dataset = VisualGroundingRefcocog(val_df, tokenizer, prefix_description, prefix_root, image_transform, bbox_transform)
+    test_dataset = VisualGroundingRefcocog(test_df, tokenizer, prefix_description, prefix_root, image_transform, bbox_transform)  # has 5024 elements
     
 
-    train_dataloader = get_dataloader(train_dataset, batch_size, shuffle=True)
-    val_dataloader = get_dataloader(val_dataset, batch_size, shuffle=False)
-    test_dataloader = get_dataloader(test_dataset, batch_size, shuffle=False)
+    train_dataloader = get_dataloader(train_dataset, batch_size, shuffle=True, with_root=True)
+    val_dataloader = get_dataloader(val_dataset, batch_size, shuffle=False, with_root=True)
+    test_dataloader = get_dataloader(test_dataset, batch_size, shuffle=False, with_root=True)
 
     if log_path is not None:
         header = ["epoch", "train_loss", "val_mean_iou", "val_accuracy"]
@@ -106,17 +107,9 @@ def main(args):
     #exit()
     total_epochs = start_epoch + n_epochs
 
-    ### For the MRC loss
-    if selected_loss == 'att_reg':
-        momentum_model = copy.deepcopy(model)
-        for param in momentum_model.parameters():
-            param.requires_grad = False  # no backprop
-    else:
-        momentum_model = None
-
     for epoch in tqdm(range(start_epoch +1 , total_epochs+1)):
 
-        metrics = train_loop(model, momentum_model, train_dataloader, optimizer, criterion_iou, device=DEVICE, selected_loss=selected_loss)
+        metrics = train_loop_attbalance(model, train_dataloader, optimizer, criterion_iou, device=DEVICE)
         mean_loss = metrics["loss"]
 
         if verbose:
