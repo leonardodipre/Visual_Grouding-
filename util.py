@@ -78,17 +78,25 @@ def modify_filename(file_name):
 
 
 class VisualGroundingRefcocog(data.Dataset):
-    # Mandatory methods are __init__, __len__ and __getitem__
-    def __init__(self, dataset, tokenizer, prefix_description=None, modified_clip_preprocess=None, bbox_transform=None):
-        
+    """Dataset returning image, description and root tokens."""
+
+    def __init__(self, dataset, tokenizer, prefix_description=None, prefix_root=None,
+                 modified_clip_preprocess=None, bbox_transform=None, root_column="coco_ex"):
+
         self.images = dataset['file_name'].tolist()
         self.descriptions = dataset['sentences'].tolist()
         #self.bboxes = [xywh2xyxy(ast.literal_eval(bbox)) for bbox in dataset['bbox'].tolist()]
         self.bboxes = [xywh2xyxy(bbox) for bbox in dataset['bbox'].tolist()]
+        # root column is expected to contain a list of tokens as a string
+        if root_column in dataset.columns:
+            self.roots = [ast.literal_eval(r)[0] if isinstance(r, str) else r for r in dataset[root_column].tolist()]
+        else:
+            self.roots = [""] * len(self.images)
         self.transform = modified_clip_preprocess
         self.bbox_transform = bbox_transform
         self.tokenizer = tokenizer
         self.prefix_description = prefix_description
+        self.prefix_root = prefix_root
 
 
     def __len__(self):
@@ -110,7 +118,12 @@ class VisualGroundingRefcocog(data.Dataset):
 
         if self.prefix_description is not None:
             description = self.prefix_description + description
-        description = self.tokenizer(description).squeeze() # (1, 77) -> (77)
+        description = self.tokenizer(description).squeeze()  # (1, 77) -> (77)
+
+        root = self.roots[idx]
+        if self.prefix_root is not None:
+            root = self.prefix_root + root
+        root = self.tokenizer(root).squeeze()
 
         if self.transform:
             original_width, original_height = image.size
@@ -128,6 +141,7 @@ class VisualGroundingRefcocog(data.Dataset):
         sample = {
             'image': image,
             'description': description,
+            'root': root,
             'bbox': bbox,
             'bbox_mask': bbox_mask,
             'bbox_ratio': bbox_ratio,
@@ -137,14 +151,43 @@ class VisualGroundingRefcocog(data.Dataset):
 
 
 
-def get_dataloader(dataset, batch_size, shuffle=True):
+def collate_with_root(batch):
+    images = torch.stack([b['image'] for b in batch])
+    descriptions = torch.stack([b['description'] for b in batch])
+    roots = torch.stack([b['root'] for b in batch])
+    bboxes = torch.stack([b['bbox'] for b in batch])
+    bbox_masks = torch.stack([b['bbox_mask'] for b in batch])
+    bbox_ratios = torch.tensor([b['bbox_ratio'] for b in batch])
+
+    text = torch.cat([descriptions, roots], dim=1)
+    desc_seg = torch.ones_like(descriptions)
+    root_seg = torch.full_like(roots, 2)
+    seg_ids = torch.cat([desc_seg, root_seg], dim=1)
+    root_mask = (seg_ids == 2).long()
+    text_mask = (text != 0).long()
+
+    return {
+        'image': images,
+        'text': text,
+        'seg_ids': seg_ids,
+        'text_mask': text_mask,
+        'root_mask': root_mask,
+        'bbox': bboxes,
+        'bbox_mask': bbox_masks,
+        'bbox_ratio': bbox_ratios,
+    }
+
+
+def get_dataloader(dataset, batch_size, shuffle=True, with_root=False):
+    collate_fn = collate_with_root if with_root else None
     data_loader = DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
-        num_workers=10,              
-        pin_memory=True,            
-        persistent_workers=True     
+        num_workers=10,
+        pin_memory=True,
+        persistent_workers=True,
+        collate_fn=collate_fn,
     )
     return data_loader
 

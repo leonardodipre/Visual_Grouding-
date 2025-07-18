@@ -1,5 +1,6 @@
 import math
 import torch
+import torch.nn.functional as F
 import copy
 from baseline import yolo_inference, clip_inference
 from util import calculate_IoU, cxcywh_to_xyxy, compare_bbox, draw_bbox, denormalize_data, rac_loss, mrc_loss, spearmanr_batch, compute_relative_rho, update_momentum
@@ -122,11 +123,45 @@ def train_loop(model, student_model, data, optimizer, criterion_iou, device, sel
         )
 
     return metrics
-            
-    
-        
 
-    return metrics
+
+def train_loop_attbalance(model, data, optimizer, criterion_iou, lambda_att=1.0, device="cuda"):
+    """Training loop with root-guided attention balance."""
+    model.train()
+    losses = []
+    for sample in tqdm(data, desc="Processing Training Dataset"):
+        images = sample["image"].to(device)
+        text = sample["text"].to(device)
+        seg_ids = sample["seg_ids"].to(device)
+        text_mask = sample["text_mask"].to(device)
+        root_mask = sample["root_mask"].to(device)
+        gt_bboxes = sample["bbox"].to(device)
+        bbox_mask = sample["bbox_mask"].to(device)
+
+        pred_box, attn = model(images, text, seg_ids, text_mask)
+        pred_box = cxcywh_to_xyxy(pred_box)
+        loss_bbox = criterion_iou(gt_bboxes, pred_box)
+
+        A = attn[-1].mean(1)
+        S = A.size(-1)
+        Lv = S - text.size(1) - 1
+        reg_idx = S - 1
+        reg2vis = A[:, reg_idx, :Lv]
+        root2vis = A[:, root_mask.bool(), :Lv].mean(1)
+
+        gated = reg2vis * (1 + model.gamma * root2vis)
+        gated = gated / gated.sum(dim=1, keepdim=True)
+        loss_att = F.binary_cross_entropy(gated, bbox_mask.float(), weight=bbox_mask.float())
+
+        loss = loss_bbox + lambda_att * loss_att
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        losses.append(loss.item())
+
+    return {"loss": np.mean(losses)}
 
         
     
@@ -144,13 +179,17 @@ def eval_loop(model, dataloader, device):
         for sample in tqdm(dataloader, desc="Evaluating"):
         #for sample in dataloader:
             images = sample["image"].to(device)
-            descriptions = sample["description"].to(device)
+            if "text" in sample:
+                text = sample["text"].to(device)
+                seg_ids = sample["seg_ids"].to(device)
+                text_mask = sample["text_mask"].to(device)
+                predicted_bboxes, _ = model(images, text, seg_ids, text_mask)
+            else:
+                descriptions = sample["description"].to(device)
+                predicted_bboxes, _ = model(images, descriptions)
             gt_bboxes = sample["bbox"].to(device)
 
-            
-            #predicted_bboxes, all_attentions = model(images, descriptions)
-            predicted_bboxes, _ = model(images, descriptions)
-            predicted_bboxes = cxcywh_to_xyxy(predicted_bboxes)        
+            predicted_bboxes = cxcywh_to_xyxy(predicted_bboxes)
             """
             for i, image in enumerate(images):
                 image = image.to('cpu')
